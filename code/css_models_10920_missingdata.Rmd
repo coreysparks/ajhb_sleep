@@ -1,0 +1,644 @@
+---
+title: "NHANES Analysis"
+author: "Corey Sparks"
+date: "2/7/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(splines)
+library(tidyverse)
+library(mediation)
+```
+
+####GOTO line 310 for mediation analysis####
+
+```{r}
+library(car)
+load("C:/Users/ozd504/OneDrive - University of Texas at San Antonio/projects/NHANES Sleep Corey/NHANES Sleep Corey/nhanes_08_16_merged.Rdata")
+nhanes_all$psu<-paste(nhanes_all$sdmvpsu, nhanes_all$year, sep = "-")
+nhanes_all$strata<-paste(nhanes_all$sdmvstra, nhanes_all$year, sep = "-")
+table(nhanes_all$year)
+nhanes_all$yearnum<-Recode(nhanes_all$year, recodes = " '2005_2006'=2005; '2007_2008'=2007; '2009_2010'=2009;'2013_2014'=2013; '2011_2012'=2011")
+library(foreign)
+mort03<-read.dta("C:/Users/ozd504/OneDrive - University of Texas at San Antonio/projects/NHANES Sleep Corey/NHANES Sleep Corey//mortalitydata/NH0304MORTDATA.dta",convert.factors = F)
+mort05<-read.dta("C:/Users/ozd504/OneDrive - University of Texas at San Antonio/projects/NHANES Sleep Corey/NHANES Sleep Corey/mortalitydata//NH0506MORTDATA.dta",convert.factors = F)
+mort07<-read.dta("C:/Users/ozd504/OneDrive - University of Texas at San Antonio/projects/NHANES Sleep Corey/NHANES Sleep Corey//mortalitydata/NH0708MORTDATA.dta",convert.factors = F)
+mort09<-read.dta("C:/Users/ozd504/OneDrive - University of Texas at San Antonio/projects/NHANES Sleep Corey/NHANES Sleep Corey//mortalitydata/NH0910MORTDATA.dta",convert.factors = F)
+mortall<-rbind(mort03, mort05, mort07, mort09)
+head(mortall)
+library(survey)
+nhanes_all<-merge(nhanes_all, mortall, by="seqn", all.x=T)
+
+nhanes_all<-nhanes_all[nhanes_all$eligstat==1&is.na(nhanes_all$mortstat)==F,]
+
+nhanes_all$d.age<-ifelse(nhanes_all$mortstat==1, nhanes_all$ridageyr+round(nhanes_all$permth_int/12,1), 2011-(nhanes_all$yearnum-nhanes_all$ridageyr))
+
+nhanes_all$timetodeath<-ifelse(nhanes_all$mortstat==1,nhanes_all$permth_int/12, 2011-nhanes_all$yearnum)
+nhanes_all$d.event<-ifelse(nhanes_all$mortstat==1,1,0)
+nhanes_all$d.2yr<-ifelse(nhanes_all$timetodeath<=2&nhanes_all$d.event==1,1,0)
+nhanes_all$d.5yr<-ifelse(nhanes_all$timetodeath<=5&nhanes_all$d.event==1,1,0)
+table(nhanes_all$ucod_leading)
+deaths<-which(nhanes_all$ucod_leading%in%c("001", "002", "003", "005", "006", "007", "008", "009", "")|is.na(nhanes_all$ucod_leading)==T)
+nhanes_all<-nhanes_all[deaths,]
+```
+
+```{r}
+options(survey.lonely.psu = "adjust")
+### Get percentages of individuals outside of healthy cut-offs ###
+low_wbc <- sum(nhanes_all$lbxwbcsi < 3.5, na.rm = TRUE) / length(nhanes_all$lbxwbcsi) #0.8%
+high_wbc <- sum(nhanes_all$lbxwbcsi > 10.5, na.rm = TRUE) / length(nhanes_all$lbxwbcsi) #6.1%
+outside_wbc <- sum(low_wbc, high_wbc) #7%
+
+low_neutro <- sum(nhanes_all$lbdneno < 1.7, na.rm = TRUE) / length(nhanes_all$lbdneno) #1.8%
+high_neutro <- sum(nhanes_all$lbdneno > 7, na.rm = TRUE) / length(nhanes_all$lbdneno) #5.5%
+outside_neutro <- sum(low_neutro, high_neutro) #7.3%
+
+low_lympho <- sum(nhanes_all$lbdlymno < 0.9, na.rm = TRUE) / length(nhanes_all$lbdlymno) #0.8%
+high_lympho <- sum(nhanes_all$lbdlymno > 2.9, na.rm = TRUE) / length(nhanes_all$lbdlymno) #11.3%
+outside_lympho <- sum(low_lympho, high_lympho) #12.1%
+
+low_mono <- sum(nhanes_all$lbdmono < 0.3, na.rm = TRUE) / length(nhanes_all$lbdmono) #1.6%
+high_mono <- sum(nhanes_all$lbdmono > 0.9, na.rm = TRUE) / length(nhanes_all$lbdmono) #2.9%
+outside_mono <- sum(low_mono, high_mono) #4.5%
+
+low_eo <- sum(nhanes_all$lbdeono < 0.05, na.rm = TRUE) / length(nhanes_all$lbdeono) #4.2%
+high_eo <- sum(nhanes_all$lbdeono > 0.5, na.rm = TRUE) / length(nhanes_all$lbdeono) #3.3%
+outside_eo <- sum(low_eo, high_eo) #7.5%
+
+high_baso <- sum(nhanes_all$lbdbano > 0.3, na.rm = TRUE) / length(nhanes_all$lbdbano) #0.2%
+outside_baso <- high_baso #0.2%
+
+## Drop implausible BMI = 130
+nhanes_all <- nhanes_all %>% filter(bmi < 130)
+
+### Drop participants with leukocyte counts below or above healthy cut-offs ###
+
+library(dplyr)
+nhanes_healthy <- nhanes_all %>% filter(between(lbxwbcsi, 3.5, 10.5), between(lbdneno, 1.7, 7), 
+                                        between(lbdlymno, 0.9, 2.9), between(lbdmono, 0.3, 0.9),
+                                        between(lbdeono, 0.05, 0.5), between(lbdbano, 0,0.3)) 
+nhanes_healthy$depress_cut<-Recode(nhanes_healthy$depress_cut, recodes = "'minimal' = 'minimal'; 'mild'= 'mild'; 'mod_severe'='severe';'moderate'='moderate'; 'severe'='severe' ", as.factor=T)
+### This code is pretty conservative, list-wise deletion ###
+#nhanes_healthy <- subset(nhanes_all, nhanes_all$lbxwbcsi >= 3.5 & nhanes_all$lbxwbcsi <= 10.5)
+#nhanes_healthy <- subset(nhanes_healthy, nhanes_healthy$lbdneno >= 1.7 & nhanes_healthy$lbdneno <= 7)
+#nhanes_healthy <- subset(nhanes_healthy, nhanes_healthy$lbdlymno >= 0.9 & nhanes_healthy$lbdlymno <= 2.9)
+#nhanes_healthy <- subset(nhanes_healthy, nhanes_healthy$lbdmono >= 0.3 & nhanes_healthy$lbdmono <= 0.9)
+#nhanes_healthy <- subset(nhanes_healthy, nhanes_healthy$lbdeono >= 0.05 & nhanes_healthy$lbdeono <= 0.5)
+#nhanes_healthy <- subset(nhanes_healthy, nhanes_healthy$lbdbano <= 0.3)
+
+```
+
+
+```{r}
+des1<-svydesign(ids =~psu, strata = ~strata, weights = ~weight, data=nhanes_all, nest=T)
+svyttest(lbxwbcsi~I(is.na(sleephours)), des1)
+svyttest(lbdmono~I(is.na(sleephours)), des1)
+svyttest(d.event~I(is.na(sleephours)), des1)
+svyttest(poorhealth~I(is.na(sleephours)), des1)
+svyttest(male~I(is.na(sleephours)), des1)
+
+svyttest(sleephours~I(is.na(lbxwbcsi)), des1)
+svyttest(lbdmono~is.na(lbxwbcsi), des1)
+svyttest(d.event~I(is.na(lbxwbcsi)), des1)
+svyttest(poorhealth~I(is.na(lbxwbcsi)), des1)
+svyttest(male~I(is.na(lbxwbcsi)), des1)
+
+
+svyttest(sleephours~I(is.na(lbdmono)), des1)
+svyttest(lbxwbcsi~I(is.na(lbdmono)), des1)
+svyttest(d.event~I(is.na(lbdmono)), des1)
+svyttest(poorhealth~I(is.na(lbdmono)), des1)
+svyttest(male~I(is.na(lbdmono)), des1)
+
+```
+
+
+
+
+
+```{r}
+#dplyr complete cases here
+library(dplyr)
+nhanes_all2<-nhanes_all%>%
+  dplyr::select(strata, psu, weight,timetodeath,d.event,poorhealth,bmi,male,race_eth,ridageyr,sl2,sl3,depress_cut,lbxwbcsi,lbdlymno,lbdmono,lbdneno,lbdeono,lbdbano,lbxlypct,lbxnepct,lbxeopct,lbxbapct,lbxmopct,sleephours,insomnia,apnea )%>%
+  filter(complete.cases(strata, psu, weight,timetodeath,d.event))
+
+#Recode insomnia and apnea NA=0
+nhanes_all2$insomnia[ is.na(nhanes_all2$insomnia) ] <- 0
+nhanes_all2$apnea[ is.na(nhanes_all2$apnea) ] <- 0
+
+nhanes_all$agebrk<-cut(nhanes_all$ridageyr,breaks =c(0,20,30,40,50,60,70,80,100), include.lowest = T)
+nhanes_all$bmibrk<-cut(nhanes_all$bmi,breaks = c(0,18.5, 25, 30, 99), include.lowest = T)
+
+nhanes_all2$agebrk<-cut(nhanes_all2$ridageyr,breaks =c(0,20,30,40,50,60,70,80,100), include.lowest = T)
+nhanes_all2$bmibrk<-cut(nhanes_all2$bmi,breaks = c(0,18.5, 25, 30, 99), include.lowest = T)
+nhanes_all2$sleepbrk <- cut(nhanes_all2$sleephours, breaks = c(0,5,7,9,Inf), include.lowest = T, right = F, labels = c("VeryLittle","Little","Healthy", "Excess"))
+nhanes_all2$sleepbrk <- relevel(nhanes_all2$sleepbrk, ref = "Healthy")
+
+des<-svydesign(ids =~psu, strata = ~strata, weights = ~weight, data=nhanes_healthy, nest=T)
+des2<-svydesign(ids =~psu, strata = ~strata, weights = ~weight, data=nhanes_all2, nest=T)
+#des2<-svydesign(ids =~psu, strata = ~strata, weights = ~weight, data=nhanes_healthy, nest=T)
+```
+
+### mod on 12/4 to get data for missing data analysis
+
+```{r}
+#dplyr complete healthy cases here
+nhanes_healthy2<-nhanes_healthy%>%
+  dplyr::select(strata, psu, weight,timetodeath,d.event,poorhealth,bmi,male,race_eth,ridageyr,sl2,sl3,depress_cut,lbxwbcsi,lbdlymno,lbdmono,lbdneno,lbdeono,lbdbano,lbxlypct,lbxnepct,lbxeopct,lbxbapct,lbxmopct,sleephours,insomnia,apnea )%>%
+  filter(complete.cases(strata, psu, weight,timetodeath,d.event,poorhealth,bmi,male,race_eth,ridageyr,sl2,sl3,depress_cut,lbxwbcsi,lbdlymno,lbdmono,lbdneno,lbdeono,lbdbano,lbxlypct,lbxnepct,lbxeopct,lbxbapct,lbxmopct,sleephours))
+
+#Recode insomnia and apnea NA=0
+nhanes_healthy2$insomnia[ is.na(nhanes_healthy2$insomnia) ] <- 0
+nhanes_healthy2$apnea[ is.na(nhanes_healthy2$apnea) ] <- 0
+```
+
+
+```{r}
+nhanes_healthy$agebrk<-cut(nhanes_healthy$ridageyr,breaks =c(0,20,30,40,50,60,70,80,100), include.lowest = T)
+quantile(nhanes_healthy$bmi)
+nhanes_healthy$bmibrk<-cut(nhanes_healthy$bmi,breaks = c(14, 24, 28, 32, 73), include.lowest = T)
+nhanes_healthy$bmibrk<-relevel(nhanes_healthy$bmibrk, ref = "(24,28]")
+
+nhanes_healthy2$agebrk<-cut(nhanes_healthy2$ridageyr,breaks =c(0,20,30,40,50,60,70,80,100), include.lowest = T)
+nhanes_healthy2$bmibrk<-cut(nhanes_healthy2$bmi,breaks = c(0, 25, 30, 99), include.lowest = T)
+
+nhanes_healthy2$sleepbrk <- cut(nhanes_healthy2$sleephours, breaks = c(0,5,7,9,Inf), include.lowest = T, right = F, labels = c("VeryLittle","Little","Healthy","Excess"))
+nhanes_healthy2$sleepbrk <- relevel(nhanes_healthy2$sleepbrk, ref = "Healthy")
+
+des_healthy<-svydesign(ids =~psu, strata = ~strata, weights = ~weight, data=nhanes_healthy, nest=T)
+des_healthy2<-svydesign(ids =~psu, strata = ~strata, weights = ~weight, data=nhanes_healthy2, nest=T)
+#des2<-svydesign(ids =~psu, strata = ~strata, weights = ~weight, data=nhanes_healthy, nest=T)
+```
+
+``` {r}
+#dplyr years 2005-2008 (healthy and sick) here
+library(stringr)
+nhanes_condition <- nhanes_all2 %>% filter(str_detect(strata, "06$"))
+nhanes_condition2 <- nhanes_all2 %>% filter(str_detect(strata, "08$"))
+nhanes_condition <- bind_rows(nhanes_condition,nhanes_condition2)
+des_condition<-svydesign(ids =~psu, strata = ~strata, weights = ~weight, data=nhanes_condition, nest=T)
+
+nhanes_condition_healthy <- nhanes_condition %>% filter(between(lbxwbcsi, 3.5, 10.5), between(lbdneno, 1.7, 7), 
+                                        between(lbdlymno, 0.9, 2.9), between(lbdmono, 0.3, 0.9),
+                                        between(lbdeono, 0.05, 0.5), between(lbdbano, 0,0.3)) 
+des_condition_healthy<-svydesign(ids =~psu, strata = ~strata, weights = ~weight, data=nhanes_condition_healthy, nest=T)
+```
+
+
+
+
+```{r laboutcomes_sleepreport,eval=FALSE, results='asis'}
+#models 9 and g-k
+library(stargazer)
+stargazer(model9,model9i, type = "html", style="default", out="~/Dropbox/NHANES Sleep Corey/NHANES Sleep and CBC/biomarker_sleepdistur_revision.html", t.auto = F, p.auto = F, ci=T, covariate.labels =c("BMI 18.5-25 (ref=<18.5)", "BMI 25-30 (ref=<18.5)", "BMI >30 (ref=<18.5)", "Male Gender", "Hispanic (ref=NH White)", "NH Black (ref=NH White)", "NH Other (ref=NH White)", "Age 20-30 (ref=<20)", "Age 30-40 (ref=<20)", "Age 40-50 (ref=<20)", "Age 50-60 (ref=<20)","Age 60-70 (ref=<20)","Age 70-80 (ref=<20)","Age 80-100 (ref=<20)","Told doctor about sleep problem", "Doctor told you had sleep problem", "Mild Depression (ref=None)","Moderate-Severe Depression (ref=None)", "Moderate Depression (ref=None)", "Severe Depression (ref=None)", "Poor Self Rated Health"),
+          column.labels = c("WBC"), keep.stat = "n",dep.var.labels.include=F)
+
+```
+
+
+#### mediation analysis####
+
+$$\underbrace{\beta} + \overbrace{\alpha}$$
+$$\underbrace{x+y}_{\text{something}} - \overbrace{(a+b)}^{\text{something else}} = 0$$
+
+```{r}
+
+nhanes_healthy$sleepbrk<- cut(nhanes_healthy$sleephours, breaks = c(0,7,9,Inf), include.lowest = T, right = F, labels = c("Little","Healthy", "Excess"))
+nhanes_healthy$sleepbrk<-relevel(nhanes_healthy$sleepbrk, ref="Healthy")
+
+#nhanes_healthy<-nhanes_healthy%>%
+#  filter(sleephours !=1, sleephours!=12, lbxwbcsi<99)
+nhanes_healthy$excesssleep<-ifelse(nhanes_healthy$sleepbrk=="Excess", 1, 0)
+nhanes_healthy$poorsleep<-ifelse(nhanes_healthy$sleepbrk %in% c("Little", "VeryLittle"),1,  0)
+
+library(dplyr)
+nhanes_healthy<-nhanes_healthy%>%
+#  filter(complete.cases(weight, sleephours,bmibrk,male,race_eth,agebrk,depress_cut,poorhealth, sl2, sl3 ))%>%
+  mutate(swt = weight/mean(weight))  
+
+nhanes_healthy$zsleep<-as.numeric(scale(nhanes_healthy$sleephours))
+nhanes_healthy$zwbc<-as.numeric(scale(nhanes_healthy$lbxwbcsi))
+nhanes_healthy$zwbc1<-as.numeric(scale(nhanes_healthy$lbdlymno))
+nhanes_healthy$zwbc2<-as.numeric(scale(nhanes_healthy$lbdbano))
+nhanes_healthy$zwbc3<-as.numeric(scale(nhanes_healthy$lbdmono))
+nhanes_healthy$zwbc4<-as.numeric(scale(nhanes_healthy$lbdneno))
+nhanes_healthy$zwbc5<-as.numeric(scale(nhanes_healthy$lbdeono))
+
+des<-svydesign(ids =~psu, strata = ~strata, weights = ~swt, data=nhanes_healthy
+               , nest=T)
+
+```
+
+### Imputation
+```{r}
+library(mice)
+
+imps<-mice(data = nhanes_healthy[, c("d.event","zwbc","zwbc1","zwbc2","zwbc3","zwbc4","zwbc5", "zsleep",  "bmibrk", "male", "race_eth", "agebrk", "depress_cut", "poorhealth", "sl2")], seed = 1115,m=10)
+
+imps
+lapply(nhanes_healthy[, c("zsleep",  "bmibrk", "male", "race_eth", "agebrk", "depress_cut", "poorhealth", "sl2")],function(x)table(is.na(x)))
+
+nhc<-nhanes_healthy%>%
+  filter(complete.cases(zsleep, bmibrk, male, race_eth, agebrk, depress_cut, poorhealth, sl2))
+dim(nhc)[1]
+dim(nhanes_healthy)[1]
+
+desc<-svydesign(ids =~psu, strata = ~strata, weights = ~swt, data=nhc
+               , nest=T)
+
+
+ofit<-svyglm(zwbc~zsleep+male+bmibrk+race_eth+agebrk+poorhealth, family=gaussian, desc)
+ofit2<-svyglm(d.event~zsleep+male+bmibrk+race_eth+agebrk+poorhealth, family=binomial,desc )
+
+fitimp<-with(data=imps, expr =glm(zwbc~zsleep+male+bmibrk+race_eth+agebrk+poorhealth, family=gaussian) )
+fitimp2<-with(data=imps, expr =glm(d.event~zsleep+male+bmibrk+race_eth+agebrk+poorhealth, family=binomial) )
+
+est1<-pool(fitimp)
+est2<-pool(fitimp2)
+
+est1
+est2
+
+lam<-data.frame(lam=est1$pooled$lambda, param=row.names(est1$pooled))
+ggplot(data=lam,aes(x=param, y=lam))+geom_col()+theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+lam2<-data.frame(lam=est2$pooled$lambda, param=row.names(est2$pooled) )
+ggplot(data=lam2,aes(x=param, y=lam))+geom_col()+theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+
+```{r}
+nhanes_healthy_i<-complete(imps, action = 1)
+nhanes_healthy_i<-cbind(nhanes_healthy_i, nhanes_healthy[, c("strata", "psu", "swt", "lbxwbcsi","lbdlymno","lbdbano","lbdmono", "lbdneno","lbdeono", "sleephours")])
+
+des_i<-svydesign(ids=~psu, strata=~strata, weights=~swt, data=nhanes_healthy_i, nest=T)
+```
+
+
+
+```{r}
+names(nhanes_healthy)
+```
+
+# Descriptives
+```{r}
+library(tableone)
+t0<-svyCreateTableOne(vars = c("d.event", "sleephours", "lbxwbcsi","lbdlymno","lbdbano","lbdmono", "lbdneno","lbdeono", "bmibrk", "male", "race_eth", "agebrk", "depress_cut", "poorhealth", "sl2"),  data= des_i)
+print(t0, format = "p")
+
+t1<-svyCreateTableOne(vars = c("sleephours", "lbxwbcsi","lbdlymno","lbdbano","lbdmono", "lbdneno","lbdeono", "bmibrk", "male", "race_eth", "agebrk", "depress_cut", "poorhealth", "sl2"), strata = "d.event", data= des_i, test = T)
+print(t1, format = "p")
+```
+
+```{r,eval=FALSE, message=FALSE,warning=FALSE, results="hide"}
+library(mediation)
+
+of1<-svyglm(d.event~zsleep, des_i, family=binomial )
+mm1<-svyglm(zwbc~zsleep,des_i)
+mm2<-svyglm(d.event~zwbc+zsleep,des_i, family=binomial )
+
+
+#med.1<-mediate(mm1, mm2, mediator="zwbc", treat="zsleep",boot=T, boot.ci.type = "bca")
+```
+```{r,eval=FALSE}
+summary(of1)
+summary(mm1)
+summary(mm2)
+#summary(med.1)
+```
+```{r,eval=FALSE, message=FALSE,warning=FALSE, results="hide"}
+library(mediation)
+
+of1<-svyglm(d.event~zsleep, des_i, family=binomial )
+mm1<-svyglm(zwbc1~zsleep,des_i)
+mm2<-svyglm(d.event~zwbc1+zsleep,des_i, family=binomial )
+
+
+#med.1<-mediate(mm1, mm2, mediator="zwbc", treat="zsleep",boot=T, boot.ci.type = "bca")
+```
+```{r,eval=FALSE}
+summary(of1)
+summary(mm1)
+summary(mm2)
+#summary(med.1)
+```
+```{r,eval=FALSE, message=FALSE,warning=FALSE, results="hide"}
+library(mediation)
+
+of1<-svyglm(d.event~zsleep, des_i, family=binomial )
+mm1<-svyglm(zwbc2~zsleep,des_i)
+mm2<-svyglm(d.event~zwbc2+zsleep,des_i, family=binomial )
+
+
+#med.1<-mediate(mm1, mm2, mediator="zwbc", treat="zsleep",boot=T, boot.ci.type = "bca")
+```
+```{r,eval=FALSE}
+summary(of1)
+summary(mm1)
+summary(mm2)
+#summary(med.1)
+```
+```{r,eval=FALSE, message=FALSE,warning=FALSE, results="hide"}
+library(mediation)
+
+of1<-svyglm(d.event~zsleep, des_i, family=binomial )
+mm1<-svyglm(zwbc3~zsleep,des_i)
+mm2<-svyglm(d.event~zwbc3+zsleep,des_i, family=binomial )
+
+
+#med.1<-mediate(mm1, mm2, mediator="zwbc", treat="zsleep",boot=T, boot.ci.type = "bca")
+```
+```{r,eval=FALSE}
+summary(of1)
+summary(mm1)
+summary(mm2)
+#summary(med.1)
+```
+```{r,eval=FALSE, message=FALSE,warning=FALSE, results="hide"}
+library(mediation)
+
+of1<-svyglm(d.event~zsleep, des_i, family=binomial )
+mm1<-svyglm(zwbc4~zsleep,des_i)
+mm2<-svyglm(d.event~zwbc4+zsleep,des_i, family=binomial )
+
+
+#med.1<-mediate(mm1, mm2, mediator="zwbc", treat="zsleep",boot=T, boot.ci.type = "bca")
+```
+```{r,eval=FALSE}
+summary(of1)
+summary(mm1)
+summary(mm2)
+#summary(med.1)
+```
+```{r,eval=FALSE, message=FALSE,warning=FALSE, results="hide"}
+library(mediation)
+
+of1<-svyglm(d.event~zsleep, des_i, family=binomial )
+mm1<-svyglm(zwbc~zsleep,des_i)
+mm2<-svyglm(d.event~zwbc+zsleep,des_i, family=binomial )
+
+
+#med.1<-mediate(mm1, mm2, mediator="zwbc", treat="zsleep",boot=T, boot.ci.type = "bca")
+```
+
+
+```{r,eval=FALSE}
+summary(of1)
+summary(mm1)
+summary(mm2)
+#summary(med.1)
+```
+
+# continuous sleep
+
+```{r,warning=FALSE, message=FALSE, results="hide"}
+med.fit<-svyglm(zwbc~zsleep, family=gaussian, des_i)
+
+#of1<-glm(d.event~zsleep, data=nhanes_all, family=binomial, weights = weight/mean(weight, na.rm=T) )
+out.fit0<-svyglm(d.event~zsleep, family=binomial,des_i )
+
+out.fit<-svyglm(d.event~zsleep+zwbc, family=binomial,des_i )
+
+
+med.out<-mediate(med.fit, out.fit, mediator="zwbc", treat="zsleep",boot=T, boot.ci.type = "bca", control.value = 0, treat.value = 1)
+med.out12<-mediate(med.fit, out.fit, mediator="zwbc", treat="zsleep",boot=T, boot.ci.type = "bca", control.value = 0, treat.value =-1)
+
+```
+
+```{r}
+summary(out.fit)
+summary(out.fit0)
+summary(med.fit)
+summary(med.out)
+summary(med.out12)
+```
+
+```{r,warning=FALSE, message=FALSE, results="hide"}
+med.fit<-svyglm(zwbc1~zsleep, family=gaussian, des_i)
+
+#of1<-glm(d.event~zsleep, data=nhanes_all, family=binomial, weights = weight/mean(weight, na.rm=T) )
+out.fit0<-svyglm(d.event~zsleep, family=binomial,des_i )
+
+out.fit<-svyglm(d.event~zsleep+zwbc1, family=binomial,des_i )
+
+
+med.out<-mediate(med.fit, out.fit, mediator="zwbc1", treat="zsleep",boot=T, boot.ci.type = "bca", control.value = 0, treat.value = 1)
+med.out12<-mediate(med.fit, out.fit, mediator="zwbc1", treat="zsleep",boot=T, boot.ci.type = "bca", control.value = 0, treat.value =-1)
+
+```
+
+```{r}
+summary(out.fit)
+summary(out.fit0)
+summary(med.fit)
+summary(med.out)
+summary(med.out12)
+```
+
+```{r,warning=FALSE, message=FALSE, results="hide"}
+med.fit<-svyglm(zwbc2~zsleep, family=gaussian, des_i)
+
+#of1<-glm(d.event~zsleep, data=nhanes_all, family=binomial, weights = weight/mean(weight, na.rm=T) )
+out.fit0<-svyglm(d.event~zsleep, family=binomial,des_i )
+
+out.fit<-svyglm(d.event~zsleep+zwbc2, family=binomial,des_i )
+
+
+med.out<-mediate(med.fit, out.fit, mediator="zwbc2", treat="zsleep",boot=T, boot.ci.type = "bca", control.value = 0, treat.value = 1)
+med.out12<-mediate(med.fit, out.fit, mediator="zwbc2", treat="zsleep",boot=T, boot.ci.type = "bca", control.value = 0, treat.value =-1)
+
+```
+
+```{r}
+summary(out.fit)
+summary(out.fit0)
+summary(med.fit)
+summary(med.out)
+summary(med.out12)
+```
+
+```{r,warning=FALSE, message=FALSE, results="hide"}
+med.fit<-svyglm(zwbc3~zsleep, family=gaussian, des_i)
+
+#of1<-glm(d.event~zsleep, data=nhanes_all, family=binomial, weights = weight/mean(weight, na.rm=T) )
+out.fit0<-svyglm(d.event~zsleep, family=binomial,des_i )
+
+out.fit<-svyglm(d.event~zsleep+zwbc3, family=binomial,des_i )
+
+
+med.out<-mediate(med.fit, out.fit, mediator="zwbc3", treat="zsleep",boot=T, boot.ci.type = "bca", control.value = 0, treat.value = 1)
+med.out12<-mediate(med.fit, out.fit, mediator="zwbc3", treat="zsleep",boot=T, boot.ci.type = "bca", control.value = 0, treat.value =-1)
+
+```
+      
+```{r}
+summary(out.fit)
+summary(out.fit0)
+summary(med.fit)
+summary(med.out)
+summary(med.out12)
+```
+
+```{r,warning=FALSE, message=FALSE, results="hide"}
+med.fit<-svyglm(zwbc4~zsleep, family=gaussian, des_i)
+
+#of1<-glm(d.event~zsleep, data=nhanes_all, family=binomial, weights = weight/mean(weight, na.rm=T) )
+out.fit0<-svyglm(d.event~zsleep, family=binomial,des_i )
+
+out.fit<-svyglm(d.event~zsleep+zwbc4, family=binomial,des_i )
+
+
+med.out<-mediate(med.fit, out.fit, mediator="zwbc4", treat="zsleep",boot=T, boot.ci.type = "bca", control.value = 0, treat.value = 1)
+med.out12<-mediate(med.fit, out.fit, mediator="zwbc4", treat="zsleep",boot=T, boot.ci.type = "bca", control.value = 0, treat.value =-1)
+
+```
+
+```{r}
+summary(out.fit)
+summary(out.fit0)
+summary(med.fit)
+summary(med.out)
+summary(med.out12)
+```
+
+```{r,warning=FALSE, message=FALSE, results="hide"}
+med.fit<-svyglm(zwbc5~zsleep, family=gaussian, des_i)
+
+#of1<-glm(d.event~zsleep, data=nhanes_all, family=binomial, weights = weight/mean(weight, na.rm=T) )
+out.fit0<-svyglm(d.event~zsleep, family=binomial,des_i )
+
+out.fit<-svyglm(d.event~zsleep+zwbc5, family=binomial,des_i )
+
+
+med.out<-mediate(med.fit, out.fit, mediator="zwbc5", treat="zsleep",boot=T, boot.ci.type = "bca", control.value = 0, treat.value = 1)
+med.out12<-mediate(med.fit, out.fit, mediator="zwbc5", treat="zsleep",boot=T, boot.ci.type = "bca", control.value = 0, treat.value =-1)
+
+```
+
+```{r}
+summary(out.fit)
+summary(out.fit0)
+summary(med.fit)
+summary(med.out)
+summary(med.out12)
+```
+
+## mediation models with covariates
+
+```{r,warning=FALSE,message=FALSE, results="hide"}
+med.fit2<-svyglm(zwbc~zsleep+male+bmibrk+race_eth+agebrk+poorhealth, family=gaussian, des_i)
+
+#of1<-glm(d.event~zsleep, data=nhanes_all, family=binomial, weights = weight/mean(weight, na.rm=T) )
+out.fit2<-svyglm(d.event~zsleep+zwbc+male+bmibrk+race_eth+agebrk+poorhealth, family=binomial,des_i )
+
+med.out2<-mediate(med.fit2, out.fit2, mediator="zwbc", treat="zsleep",boot=T, boot.ci.type = "bca",control.value=0, treat.value = -1)
+
+med.out22<-mediate(med.fit2, out.fit2, mediator="zwbc", treat="zsleep",boot=T, boot.ci.type = "bca",control.value=0, treat.value = 1)
+ 
+
+```
+```{r}
+summary(med.fit2)
+summary(out.fit2)
+
+summary(med.out2)
+summary(med.out22)
+```
+
+```{r,warning=FALSE,message=FALSE, results="hide"}
+med.fit2<-svyglm(zwbc1~zsleep+male+bmibrk+race_eth+agebrk+poorhealth, family=gaussian, des_i)
+
+#of1<-glm(d.event~zsleep, data=nhanes_all, family=binomial, weights = weight/mean(weight, na.rm=T) )
+out.fit2<-svyglm(d.event~zsleep+zwbc1+male+bmibrk+race_eth+agebrk+poorhealth, family=binomial,des_i )
+
+med.out2<-mediate(med.fit2, out.fit2, mediator="zwbc1", treat="zsleep",boot=T, boot.ci.type = "bca",control.value=0, treat.value = -1)
+
+med.out22<-mediate(med.fit2, out.fit2, mediator="zwbc1", treat="zsleep",boot=T, boot.ci.type = "bca",control.value=0, treat.value = 1)
+ 
+
+```
+```{r}
+summary(med.fit2)
+summary(out.fit2)
+
+summary(med.out2)
+summary(med.out22)
+```
+
+```{r,warning=FALSE,message=FALSE, results="hide"}
+med.fit2<-svyglm(zwbc4~zsleep+male+bmibrk+race_eth+agebrk+poorhealth, family=gaussian, des_i)
+
+#of1<-glm(d.event~zsleep, data=nhanes_all, family=binomial, weights = weight/mean(weight, na.rm=T) )
+out.fit2<-svyglm(d.event~zsleep+zwbc4+male+bmibrk+race_eth+agebrk+poorhealth, family=binomial,des_i )
+
+med.out2<-mediate(med.fit2, out.fit2, mediator="zwbc4", treat="zsleep",boot=T, boot.ci.type = "bca",control.value=0, treat.value = -1)
+
+med.out22<-mediate(med.fit2, out.fit2, mediator="zwbc4", treat="zsleep",boot=T, boot.ci.type = "bca",control.value=0, treat.value = 1)
+ 
+
+```
+```{r}
+summary(med.fit2)
+summary(out.fit2)
+
+summary(med.out2)
+summary(med.out22)
+```
+
+## Lavaan models
+```{r, eval=FALSE}
+
+nhanes_healthy$zwbc<-scale(nhanes_healthy$lbxwbcsi)
+nhanes_healthy$swts<-nhanes_healthy$weight/mean(nhanes_healthy$weight, na.rm=T)
+
+library(lavaan)
+    
+model<- '
+#direct
+d.5yr~c*sleephours + male + poorhealth
+#mediator
+zwbc ~ a*sleephours+ male + poorhealth
+d.5yr ~ b*zwbc 
+#indirect effect (a*b)
+ab := a*b
+# total effect 
+total :=c + (a*b)
+'
+
+fit<-sem(model, data=nhanes_healthy, cluster = "strata", sampling.weights ="swts" , se="bootstrap")
+
+summary(fit)
+
+#contrast
+# med.fit<-glm(zwbc~bmibrk+male+race_eth+agebrk+poorsleep+sl2+sl3+depress_cut+poorhealth, family=gaussian, data=nhanes_all, weights = weight/mean(weight, na.rm=T) )
+# # 
+#  out.fit<-glm(d.event~poorhealth+bmibrk+male+race_eth+agebrk+poorsleep+sl2+sl3+depress_cut+zwbc,data=nhanes_all, family=binomial, weights = weight/mean(weight, na.rm=T) )
+# # 
+#  med.out<-mediate(med.fit, out.fit, mediator="zwbc", treat="poorsleep", sims=500)
+#  summary(med.out)
+
+# #excess = 1
+#  nhanes_all$excesssl<-ifelse(nhanes_all$sleepbrk=="Excess", 1, 0)
+#  med.fit<-glm(zwbc~bmibrk+male+race_eth+agebrk+excesssl+sl2+sl3+depress_cut+poorhealth, family=gaussian, data=nhanes_all, weights = weight/mean(weight, na.rm=T), subset=sleepbrk%in%c("Excess", "Healthy") )
+# # 
+#  out.fit<-glm(d.event~poorhealth+bmibrk+male+race_eth+agebrk+excesssl+sl2+sl3+depress_cut+zwbc,data=nhanes_all, family=binomial, weights = weight/mean(weight, na.rm=T),subset=sleepbrk%in%c("Excess", "Healthy") )
+# # 
+#  med.out2<-mediate(med.fit, out.fit, mediator="zwbc", treat="excesssl", sims=500)
+#  summary(med.out2)
+# # 
+
+#unhealthy = 1
+# nhanes_all$unhealsl<-ifelse(nhanes_all$sleepbrk %in% c("Little", "VeryLittle"), 1, 0)
+# med.fit<-glm(zwbc~bmibrk+male+race_eth+agebrk+unhealsl+sl2+sl3+depress_cut+poorhealth, family=gaussian, data=nhanes_all, weights = weight/mean(weight, na.rm=T), subset=sleepbrk%in% c("Little", "VeryLittle", "Healthy") )
+# 
+# out.fit<-glm(d.event~poorhealth+bmibrk+male+race_eth+agebrk+unhealsl+sl2+sl3+depress_cut+zwbc,data=nhanes_all, family=binomial, weights = weight/mean(weight, na.rm=T),subset=sleepbrk%in% c("Little", "VeryLittle", "Healthy") )
+# 
+# med.out<-mediate(med.fit, out.fit, mediator="zwbc", treat="unhealsl",boot=T, boot.ci.type = "bca")
+# summary(med.out)
+
+```
+
